@@ -1874,6 +1874,188 @@ def package_search_read_cmd(
         handle_cli_error(e, "Unexpected error")
 
 
+interface_summary_app = typer.Typer(help="Interface summary index commands: build and search symbol-level summaries.")
+app.add_typer(interface_summary_app, name="interface-summary")
+
+
+@interface_summary_app.command("index")
+def interface_summary_index(
+    path: str = typer.Argument(..., help="Path to the local repository."),
+    force: bool = typer.Option(False, "--force", "-f", help="Force rebuild of the index."),
+    file_extensions: Optional[str] = typer.Option(
+        None, "--extensions", "-e", help="Comma-separated file extensions to include (e.g. '.py,.js')."
+    ),
+    llm_model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model for summaries."),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output to JSON file instead of stdout."),
+    ref: Optional[str] = typer.Option(
+        None, "--ref", help="Git ref (SHA, tag, or branch) to checkout for remote repositories."
+    ),
+):
+    """Build an interface summary index for the repository.
+
+    Scans source files, extracts functions/classes/methods, generates
+    LLM summaries, and stores structured records + vector embeddings.
+
+    Examples:
+        kit interface-summary index .
+        kit interface-summary index . --extensions ".py,.js" --force
+    """
+    from kit import Repository
+    from kit.interface_summary_index import InterfaceSummaryIndexer
+    from kit.summaries import OllamaConfig, OpenAIConfig
+
+    try:
+        repo = Repository(path, ref=ref)
+
+        if llm_model:
+            config = OpenAIConfig(model=llm_model)
+        else:
+            api_key = os.getenv("OPENAI_API_KEY")
+            if api_key:
+                config = OpenAIConfig()
+            else:
+                config = OllamaConfig()
+
+        summarizer = repo.get_summarizer(config)
+
+        ext_list = None
+        if file_extensions:
+            ext_list = [e.strip() for e in file_extensions.split(",")]
+
+        indexer = InterfaceSummaryIndexer(repo=repo, summarizer=summarizer)
+        records = indexer.build(force=force, file_extensions=ext_list)
+
+        record_dicts = [r.to_dict() for r in records]
+
+        if output:
+            Path(output).write_text(json.dumps(record_dicts, indent=2))
+            typer.echo(f"Interface summary index built. {len(records)} records written to {output}")
+        else:
+            typer.echo(f"Interface summary index built. {len(records)} symbol summaries indexed.")
+            for r in records[:20]:
+                typer.echo(f"  {r.type}: {r.name} ({r.file_path}:{r.line_start}-{r.line_end})")
+            if len(records) > 20:
+                typer.echo(f"  ... and {len(records) - 20} more")
+
+    except Exception as e:
+        typer.secho(f"❌ Interface summary index failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@interface_summary_app.command("search")
+def interface_summary_search(
+    path: str = typer.Argument(..., help="Path to the local repository."),
+    query: str = typer.Argument(..., help="Natural language query to search for."),
+    top_k: int = typer.Option(10, "--top-k", "-k", help="Maximum number of results."),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output to JSON file instead of stdout."),
+    ref: Optional[str] = typer.Option(
+        None, "--ref", help="Git ref (SHA, tag, or branch) to checkout for remote repositories."
+    ),
+):
+    """Search interface summaries by semantic similarity.
+
+    Requires that the index has been built first via 'interface-summary index'.
+
+    Examples:
+        kit interface-summary search . "how does login session creation work?"
+        kit interface-summary search . "database connection" --top-k 5
+    """
+    from kit import Repository
+    from kit.interface_summary_index import InterfaceSummaryIndexer
+    from kit.summaries import OllamaConfig, OpenAIConfig
+
+    try:
+        repo = Repository(path, ref=ref)
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            config = OpenAIConfig()
+        else:
+            config = OllamaConfig()
+
+        summarizer = repo.get_summarizer(config)
+        indexer = InterfaceSummaryIndexer(repo=repo, summarizer=summarizer)
+        searcher = indexer.get_searcher()
+
+        results = searcher.search(query, top_k=top_k)
+
+        if output:
+            Path(output).write_text(json.dumps(results, indent=2))
+            typer.echo(f"Search results written to {output}")
+        else:
+            if not results:
+                typer.echo(f"No interface summaries found for '{query}'")
+                typer.echo("Run 'kit interface-summary index' first to build the index.")
+            else:
+                typer.echo(f"Found {len(results)} matching interface summaries:")
+                for i, r in enumerate(results, 1):
+                    typer.echo(
+                        f"{i}. [{r.get('type', '?')}] {r.get('name', '?')} "
+                        f"({r.get('file_path', '?')}:{r.get('line_start', '?')}-{r.get('line_end', '?')}) "
+                        f"score={r.get('score', 0):.3f}"
+                    )
+                    summary = r.get("summary", "")
+                    if summary:
+                        snippet = summary[:150].replace("\n", " ")
+                        if len(snippet) == 150:
+                            snippet += "..."
+                        typer.echo(f"   {snippet}")
+
+    except Exception as e:
+        typer.secho(f"❌ Interface summary search failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
+@interface_summary_app.command("open-source")
+def interface_summary_open_source(
+    path: str = typer.Argument(..., help="Path to the local repository."),
+    summary_id: str = typer.Argument(..., help="Summary record ID (e.g. 'relative/path/file.py::symbol_name')."),
+    output: Optional[str] = typer.Option(None, "--output", "-o", help="Output to file instead of stdout."),
+    ref: Optional[str] = typer.Option(
+        None, "--ref", help="Git ref (SHA, tag, or branch) to checkout for remote repositories."
+    ),
+):
+    """Read source code for an interface summary record.
+
+    Locates the source file and extracts the code snippet corresponding
+    to the summary record's line range.
+
+    Examples:
+        kit interface-summary open-source . "services/auth.py::AuthService"
+    """
+    from kit import Repository
+    from kit.interface_summary_index import InterfaceSummaryIndexer, open_source_for_summary
+    from kit.summaries import OllamaConfig, OpenAIConfig
+
+    try:
+        repo = Repository(path, ref=ref)
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        if api_key:
+            config = OpenAIConfig()
+        else:
+            config = OllamaConfig()
+
+        summarizer = repo.get_summarizer(config)
+        indexer = InterfaceSummaryIndexer(repo=repo, summarizer=summarizer)
+
+        source = open_source_for_summary(repo, summary_id, indexer._records)
+
+        if source is None:
+            typer.secho(f"Source not found for summary ID: {summary_id}", fg=typer.colors.RED)
+            raise typer.Exit(code=1)
+
+        if output:
+            Path(output).write_text(source)
+            typer.echo(f"Source code written to {output}")
+        else:
+            typer.echo(source)
+
+    except Exception as e:
+        typer.secho(f"❌ Failed to open source: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
 def handle_cli_error(error: Exception, error_type: str = "Error", help_text: Optional[str] = None) -> None:
     """Consistent error handling for CLI commands."""
     if isinstance(error, ValueError):

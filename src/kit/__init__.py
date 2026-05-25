@@ -8,6 +8,13 @@ __version__ = "3.5.1"
 from .code_searcher import CodeSearcher
 from .context_extractor import ContextExtractor
 from .docstring_indexer import DocstringIndexer, SummarySearcher
+from .interface_summary_index import (
+    InterfaceSummaryIndexer,
+    InterfaceSummaryRecord,
+    InterfaceSummarySearcher,
+    get_source_snippet,
+    open_source_for_summary,
+)
 from .llm_context import ContextAssembler
 from .multi_repo import MultiRepo
 from .repo_mapper import RepoMapper
@@ -104,8 +111,12 @@ __all__ = [
     "SummarySearcher",
     "ContextAssembler",
     "TreeSitterSymbolExtractor",
+    "InterfaceSummaryIndexer",
+    "InterfaceSummaryRecord",
+    "InterfaceSummarySearcher",
+    "get_source_snippet",
+    "open_source_for_summary",
     "get_tool_schemas",
-    # Conditionally add Summarizer related classes if they were imported
     *(
         ["Summarizer", "OpenAIConfig", "AnthropicConfig", "GoogleConfig", "LLMError"]
         if "Summarizer" in globals()
