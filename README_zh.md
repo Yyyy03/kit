@@ -111,6 +111,47 @@ contents = repo.get_file_content([
 print(contents["src/utils/helper.py"])
 ```
 
+### 代码文档生成
+
+从代码库生成结构化 Markdown 文档：
+
+```python
+from kit import Repository
+from kit.codebase_markdown_docs import CodebaseMarkdownDocGenerator
+
+# 加载仓库
+repo = Repository("/path/to/your/codebase")
+
+# 可选：配置 LLM 以生成 AI 摘要
+from kit.summaries import OpenAIConfig
+config = OpenAIConfig(
+    api_key="your-api-key",
+    model="gpt-4",
+    base_url="https://api.openai.com/v1"  # 或自定义端点
+)
+summarizer = repo.get_summarizer(config)
+
+# 生成文档
+generator = CodebaseMarkdownDocGenerator(repo=repo, summarizer=summarizer)
+records = generator.generate()
+
+# 渲染为 Markdown
+renderer = MarkdownRenderer()
+md_content = renderer.render_full(records, title="我的项目文档")
+
+# 或直接生成到文件
+generator.generate_to_file("docs.md", title="我的项目文档")
+
+# 带选项
+generator.generate_to_file(
+    "docs.md",
+    file_extensions=[".py", ".js"],  # 仅 Python 和 JavaScript 文件
+    max_symbols=100,                  # 限制最多 100 个符号
+    verbose=True,                     # 包含 Type、Signature、Import、Location
+    include_source=True,              # 包含源代码块
+)
+```
+
 ### 命令行界面
 
 `kit` 提供了全面的 CLI，用于仓库分析和代码探索。
@@ -170,6 +211,27 @@ kit package-search-hybrid django "authentication middleware"
 kit package-search-read requests "requests/models.py"
 ```
 
+**代码文档生成：**
+```bash
+# 为仓库生成 Markdown 文档
+kit code-docs generate /path/to/repo -o docs.md
+
+# 使用 LLM 生成摘要（需要 OPENAI_API_KEY 或自定义端点）
+kit code-docs generate /path/to/repo -o docs.md --base-url "https://api.openai.com/v1" --model "gpt-4"
+
+# 限制符号数量和文件扩展名
+kit code-docs generate /path/to/repo -o docs.md --extensions ".py,.js" --max-symbols 50
+
+# 详细模式（包含 Type、Signature、Import、Location）
+kit code-docs generate /path/to/repo -o docs.md --verbose
+
+# 包含源代码
+kit code-docs generate /path/to/repo -o docs.md --verbose --include-source
+
+# 按目录拆分输出
+kit code-docs generate /path/to/repo -o docs/ --split-by-dir
+```
+
 详见 [CLI 文档](https://kit.cased.com/introduction/cli) 获取完整使用示例。
 
 ## 核心工具能力
@@ -193,6 +255,13 @@ kit package-search-read requests "requests/models.py"
 *   **生成代码摘要：**
     *   使用 `Summarizer` 通过 LLM 为文件、函数或类生成自然语言摘要（如 `summarizer.summarize_file()`、`summarizer.summarize_function()`）。
     *   使用 `DocstringIndexer` 构建这些 AI 生成的文档字符串的可搜索索引，用 `SummarySearcher` 查询实现智能代码发现。
+
+*   **生成代码库文档：**
+    *   使用 `CodebaseMarkdownDocGenerator` 从代码库创建结构化 Markdown 文档。
+    *   自动提取符号（函数、类、方法），生成摘要、参数、返回值和用法示例。
+    *   支持 LLM 摘要，可使用自定义端点（OpenAI、本地模型等）。
+    *   每个符号输出统一字段：**Summary**、**Parameters**、**Return Value**、**Usage**。
+    *   CLI 支持：`kit code-docs generate /path/to/repo -o docs.md`。
 
 *   **分析代码依赖：**
     *   使用 `repo.get_dependency_analyzer()` 映射模块间的导入关系，理解代码库结构。

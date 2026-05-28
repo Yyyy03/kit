@@ -8,6 +8,11 @@ Classes:
     InterfaceSummaryRecord - structured summary for a single symbol
     InterfaceSummaryIndexer - builds the index from a repository
     InterfaceSummarySearcher - queries the index with semantic search
+
+Functions:
+    get_source_snippet - read source code by file path and line range
+    open_source_for_summary - read source code by summary record ID
+    detect_interface_type - detect detailed interface type (route_handler etc.)
 """
 
 from __future__ import annotations
@@ -16,9 +21,10 @@ import hashlib
 import json
 import logging
 import os
+import re
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from .docstring_indexer import DocstringIndexer
 from .repository import Repository
@@ -28,7 +34,7 @@ from .vector_searcher import VectorDBBackend
 
 logger = logging.getLogger(__name__)
 
-SUPPORTED_SYMBOL_TYPES = {"function", "method", "class"}
+SUPPORTED_SYMBOL_TYPES = {"function", "method", "class", "route_handler"}
 
 LANGUAGES_MAP = TreeSitterSymbolExtractor.LANGUAGES if hasattr(TreeSitterSymbolExtractor, "LANGUAGES") else set()
 
@@ -53,6 +59,48 @@ _LANG_EXT_MAP = {
     ".tf": "hcl",
     ".hcl": "hcl",
 }
+
+_FASTAPI_DECORATOR_RE = re.compile(
+    r"@app\.(get|post|put|delete|patch|head|options|websocket|api_route)\s*\(\s*['\"]([^'\"]*)['\"]",
+    re.IGNORECASE,
+)
+_FLASK_DECORATOR_RE = re.compile(
+    r"@app\.route\s*\(\s*['\"]([^'\"]*)['\"]\s*,\s*methods\s*=\s*\[([^\]]*)\]",
+    re.IGNORECASE,
+)
+
+
+@dataclass
+class SourceSnippetResult:
+    """Structured result from source snippet extraction."""
+
+    file_path: str
+    line_start: int
+    line_end: int
+    source: str
+    error: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d = asdict(self)
+        if self.error and not self.source:
+            d["source"] = ""
+        return d
+
+
+class InterfaceSummaryError(Exception):
+    """Base error for interface summary operations."""
+
+    def __init__(self, message: str, detail: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.detail = detail or {}
+
+
+class SummaryNotFoundError(InterfaceSummaryError):
+    """Raised when a summary ID does not exist in the index."""
+
+
+class SourceReadError(InterfaceSummaryError):
+    """Raised when source code cannot be read for a given path/range."""
 
 
 @dataclass
@@ -106,6 +154,107 @@ def _make_record_id(file_path: str, symbol_name: str) -> str:
     return f"{file_path}::{symbol_name}"
 
 
+def _compute_content_hash(code: str) -> str:
+    """Compute SHA-1 hash of code content for incremental change detection."""
+    if not code:
+        return ""
+    return hashlib.sha1(code.encode("utf-8", "ignore")).hexdigest()
+
+
+def detect_interface_type(
+    symbol: Dict[str, Any],
+    source_code: str,
+    file_path: str,
+) -> Tuple[str, Dict[str, Any]]:
+    """Detect detailed interface type beyond basic symbol types.
+
+    Examines decorator patterns and surrounding code to identify
+    whether a function is a route handler, CLI command, etc.
+
+    Parameters
+    ----------
+    symbol
+        Symbol dict from tree-sitter extraction.
+    source_code
+        Full source code of the file containing the symbol.
+    file_path
+        Relative file path (used to determine language).
+
+    Returns
+    -------
+    Tuple of (interface_type, metadata_dict).
+    interface_type is one of: function, method, class, route_handler,
+    cli_command_handler, event_handler, unknown.
+    metadata_dict may contain framework, http_method, route_path, etc.
+    """
+    base_type = symbol.get("type", "").lower()
+    metadata: Dict[str, Any] = {}
+    language = _detect_language(file_path)
+
+    if language == "python" and base_type in ("function", "method"):
+        lines_before = _get_lines_before_symbol(source_code, symbol, max_lines=5)
+        decorator_text = "\n".join(lines_before)
+
+        fastapi_match = _FASTAPI_DECORATOR_RE.search(decorator_text)
+        if fastapi_match:
+            http_method = fastapi_match.group(1).upper()
+            route_path = fastapi_match.group(2)
+            return ("route_handler", {
+                "framework": "FastAPI",
+                "http_method": http_method,
+                "route_path": route_path,
+            })
+
+        flask_match = _FLASK_DECORATOR_RE.search(decorator_text)
+        if flask_match:
+            route_path = flask_match.group(1)
+            methods_str = flask_match.group(2)
+            methods = [m.strip().strip("'\"") for m in methods_str.split(",")]
+            http_method = methods[0].upper() if methods else "GET"
+            return ("route_handler", {
+                "framework": "Flask",
+                "http_method": http_method,
+                "route_path": route_path,
+                "methods": methods,
+            })
+
+    return (base_type, metadata)
+
+
+def _get_lines_before_symbol(
+    source_code: str,
+    symbol: Dict[str, Any],
+    max_lines: int = 10,
+) -> List[str]:
+    """Get decorator lines immediately preceding a symbol's start line.
+
+    Only returns lines that are decorators (starting with @) or blank lines
+    directly adjacent to the symbol definition. Stops at the first non-decorator,
+    non-blank line encountered (going backwards from the symbol).
+    """
+    lines = source_code.splitlines()
+    start_line = symbol.get("start_line", 0)
+    if isinstance(start_line, str):
+        try:
+            start_line = int(start_line)
+        except (ValueError, TypeError):
+            start_line = 0
+
+    decorator_lines: List[str] = []
+    for i in range(start_line - 1, max(0, start_line - max_lines) - 1, -1):
+        if i < 0 or i >= len(lines):
+            break
+        line = lines[i].strip()
+        if line.startswith("@"):
+            decorator_lines.insert(0, lines[i])
+        elif line == "":
+            decorator_lines.insert(0, lines[i])
+        else:
+            break
+
+    return decorator_lines
+
+
 class InterfaceSummaryIndexer:
     """Builds a vector index of interface-level symbol summaries.
 
@@ -126,6 +275,9 @@ class InterfaceSummaryIndexer:
         Optional VectorDBBackend override.
     persist_dir
         Where on disk to store vector index data.
+    detect_route_handlers
+        If True, attempt to detect FastAPI/Flask route handlers
+        and mark them as type "route_handler" with framework metadata.
     """
 
     def __init__(
@@ -136,9 +288,11 @@ class InterfaceSummaryIndexer:
         *,
         backend: Optional[VectorDBBackend] = None,
         persist_dir: Optional[str] = None,
+        detect_route_handlers: bool = True,
     ) -> None:
         self.repo = repo
         self.summarizer = summarizer
+        self.detect_route_handlers = detect_route_handlers
 
         if persist_dir:
             self.persist_dir = persist_dir
@@ -178,13 +332,14 @@ class InterfaceSummaryIndexer:
         """Build the interface summary index for the repository.
 
         Scans all supported source files, extracts symbols of supported
-        types (function, method, class), generates LLM summaries, and
-        stores structured records + vector embeddings.
+        types (function, method, class, route_handler), generates LLM
+        summaries, and stores structured records + vector embeddings.
 
         Parameters
         ----------
         force
-            If True, rebuild even if cached data exists.
+            If True, rebuild even if cached data exists. Clears old
+            vector embeddings and record cache before re-indexing.
         file_extensions
             Optional list of file extensions to include.
         symbols
@@ -205,18 +360,22 @@ class InterfaceSummaryIndexer:
             ext_set = set(file_extensions)
             all_symbols = [s for s in all_symbols if Path(s.get("file", "")).suffix.lower() in ext_set]
 
-        supported = [s for s in all_symbols if s.get("type", "").lower() in SUPPORTED_SYMBOL_TYPES]
+        if force:
+            self._clear_index()
+
+        supported = [s for s in all_symbols if s.get("type", "").lower() in SUPPORTED_SYMBOL_TYPES or s.get("type", "").lower() in {"function", "method", "class"}]
 
         records: List[InterfaceSummaryRecord] = []
         embeddings: List[List[float]] = []
         metadatas: List[Dict[str, Any]] = []
         ids: List[str] = []
+        seen_ids: set[str] = set()
 
         for sym in supported:
             file_path = sym.get("file", "")
             rel_path = self._to_relative_path(file_path)
             symbol_name = sym.get("name", "")
-            symbol_type = sym.get("type", "").lower()
+            base_symbol_type = sym.get("type", "").lower()
             code = sym.get("code", "")
             start_line = sym.get("start_line", sym.get("line", -1))
             end_line = sym.get("end_line", start_line)
@@ -225,9 +384,23 @@ class InterfaceSummaryIndexer:
             if not symbol_name or not rel_path:
                 continue
 
+            interface_type = base_symbol_type
+            interface_metadata: Dict[str, Any] = {}
+
+            if self.detect_route_handlers and base_symbol_type in ("function", "method") and _detect_language(rel_path) == "python":
+                try:
+                    file_content = self.repo.get_file_content(rel_path)
+                    interface_type, interface_metadata = detect_interface_type(sym, file_content, rel_path)
+                except Exception as exc:
+                    logger.debug(f"Route handler detection skipped for {rel_path}: {exc}")
+
             record_id = _make_record_id(rel_path, display_name)
 
-            content_hash = hashlib.sha1(code.encode("utf-8", "ignore")).hexdigest() if code else ""
+            if record_id in seen_ids:
+                continue
+            seen_ids.add(record_id)
+
+            content_hash = _compute_content_hash(code)
 
             if not force and record_id in self._records:
                 cached = self._records[record_id]
@@ -237,20 +410,20 @@ class InterfaceSummaryIndexer:
 
             summary_text = ""
             try:
-                if symbol_type in ("function", "method"):
+                if interface_type == "route_handler" or base_symbol_type in ("function", "method"):
                     summary_text = self.summarizer.summarize_function(rel_path, display_name)
-                elif symbol_type == "class":
+                elif base_symbol_type == "class":
                     summary_text = self.summarizer.summarize_class(rel_path, display_name)
             except Exception as exc:
                 logger.warning(f"Summarization failed for {record_id}: {exc}")
                 summary_text = f"(summary unavailable: {exc})"
 
-            signature = _extract_signature(code, symbol_type)
+            signature = _extract_signature(code, interface_type)
             language = _detect_language(rel_path)
 
             record = InterfaceSummaryRecord(
                 id=record_id,
-                type=symbol_type,
+                type=interface_type,
                 name=display_name,
                 signature=signature,
                 summary=summary_text,
@@ -261,7 +434,7 @@ class InterfaceSummaryIndexer:
                 content_hash=content_hash,
                 dependencies=[],
                 side_effects=[],
-                metadata={},
+                metadata=interface_metadata,
             )
 
             self._records[record_id] = record
@@ -280,8 +453,40 @@ class InterfaceSummaryIndexer:
         else:
             logger.warning("No embeddings generated for interface summary index.")
 
+        self._cleanup_orphans(seen_ids)
         self._save_records()
         return records
+
+    def _clear_index(self) -> None:
+        """Clear existing vector index and record cache for a force rebuild."""
+        old_ids = list(self._records.keys())
+        if old_ids:
+            try:
+                self._docstring_indexer.backend.delete(ids=old_ids)
+            except Exception:
+                logger.debug("Could not delete old embeddings during force rebuild.")
+        self._records = {}
+
+    def _cleanup_orphans(self, current_ids: set[str]) -> None:
+        """Remove records for symbols that no longer exist in the repository.
+
+        Parameters
+        ----------
+        current_ids
+            Set of record IDs that are still present after this build.
+        """
+        orphan_ids = set(self._records.keys()) - current_ids
+        if not orphan_ids:
+            return
+
+        logger.info(f"Cleaning up {len(orphan_ids)} orphan records.")
+        for oid in orphan_ids:
+            self._records.pop(oid, None)
+
+        try:
+            self._docstring_indexer.backend.delete(ids=list(orphan_ids))
+        except Exception:
+            logger.debug("Could not delete orphan embeddings from backend.")
 
     def _to_relative_path(self, file_path: str) -> str:
         """Convert an absolute or repo-relative file path to repo-relative form."""
@@ -296,13 +501,28 @@ class InterfaceSummaryIndexer:
             json.dump({k: v.to_dict() for k, v in self._records.items()}, f, indent=2)
 
     def get_record(self, record_id: str) -> Optional[InterfaceSummaryRecord]:
+        """Retrieve a single record by ID, or None if not found."""
         return self._records.get(record_id)
 
     def get_all_records(self) -> List[InterfaceSummaryRecord]:
+        """Return all indexed records."""
         return list(self._records.values())
 
     def get_searcher(self) -> "InterfaceSummarySearcher":
+        """Return a searcher bound to this indexer."""
         return InterfaceSummarySearcher(indexer=self)
+
+    def get_stats(self) -> Dict[str, Any]:
+        """Return statistics about the current index."""
+        type_counts: Dict[str, int] = {}
+        for r in self._records.values():
+            type_counts[r.type] = type_counts.get(r.type, 0) + 1
+
+        return {
+            "total_records": len(self._records),
+            "type_counts": type_counts,
+            "persist_dir": self.persist_dir,
+        }
 
 
 class InterfaceSummarySearcher:
@@ -320,7 +540,7 @@ class InterfaceSummarySearcher:
         """Search interface summaries by semantic similarity.
 
         Returns a list of dicts with: score, id, type, name, summary,
-        file_path, line_start, line_end.
+        file_path, line_start, line_end, metadata (if available).
         """
         if top_k <= 0:
             return []
@@ -335,7 +555,7 @@ class InterfaceSummarySearcher:
             score = hit.get("score", 0.0)
 
             if record:
-                results.append({
+                result = {
                     "score": score,
                     "id": record.id,
                     "type": record.type,
@@ -344,7 +564,10 @@ class InterfaceSummarySearcher:
                     "file_path": record.file_path,
                     "line_start": record.line_start,
                     "line_end": record.line_end,
-                })
+                }
+                if record.metadata:
+                    result["metadata"] = record.metadata
+                results.append(result)
             else:
                 results.append({
                     "score": score,
@@ -360,8 +583,17 @@ class InterfaceSummarySearcher:
         return results
 
 
-def get_source_snippet(repo: Repository, file_path: str, line_start: int, line_end: int) -> Optional[str]:
+def get_source_snippet(
+    repo: Repository,
+    file_path: str,
+    line_start: int,
+    line_end: int,
+) -> Optional[str]:
     """Read a source code snippet from the repository by file path and line range.
+
+    Returns just the source code text, or None if the file cannot be read.
+    For structured results with file path and line info, use
+    ``get_source_snippet_structured`` instead.
 
     Parameters
     ----------
@@ -378,18 +610,120 @@ def get_source_snippet(repo: Repository, file_path: str, line_start: int, line_e
     -------
     The source code snippet as a string, or None if the file cannot be read.
     """
+    result = get_source_snippet_structured(repo, file_path, line_start, line_end)
+    if result.error:
+        return None
+    return result.source
+
+
+def get_source_snippet_structured(
+    repo: Repository,
+    file_path: str,
+    line_start: int,
+    line_end: int,
+) -> SourceSnippetResult:
+    """Read a source code snippet and return a structured result with error details.
+
+    Unlike ``get_source_snippet``, this function always returns a
+    ``SourceSnippetResult`` object with clear error messages for invalid
+    paths, out-of-range line numbers, etc.
+
+    Parameters
+    ----------
+    repo
+        Active Repository instance.
+    file_path
+        Relative file path within the repository.
+    line_start
+        Starting line number (0-indexed, matching tree-sitter output).
+    line_end
+        Ending line number (0-indexed).
+
+    Returns
+    -------
+    SourceSnippetResult with file_path, line_start, line_end, source, and error.
+    """
     try:
         content = repo.get_file_content(file_path)
-    except (FileNotFoundError, IOError):
-        return None
+    except FileNotFoundError:
+        return SourceSnippetResult(
+            file_path=file_path,
+            line_start=line_start,
+            line_end=line_end,
+            source="",
+            error=f"File not found in repository: {file_path}",
+        )
+    except IOError as e:
+        return SourceSnippetResult(
+            file_path=file_path,
+            line_start=line_start,
+            line_end=line_end,
+            source="",
+            error=f"Error reading file {file_path}: {e}",
+        )
+
+    if not content:
+        return SourceSnippetResult(
+            file_path=file_path,
+            line_start=line_start,
+            line_end=line_end,
+            source="",
+            error=f"File {file_path} is empty.",
+        )
 
     lines = content.splitlines()
-    snippet_lines = lines[line_start : line_end + 1]
-    return "\n".join(snippet_lines)
+    total_lines = len(lines)
+
+    if line_start < 0:
+        return SourceSnippetResult(
+            file_path=file_path,
+            line_start=line_start,
+            line_end=line_end,
+            source="",
+            error=f"line_start ({line_start}) must be >= 0.",
+        )
+
+    if line_end < line_start:
+        return SourceSnippetResult(
+            file_path=file_path,
+            line_start=line_start,
+            line_end=line_end,
+            source="",
+            error=f"line_end ({line_end}) must be >= line_start ({line_start}).",
+        )
+
+    if line_start >= total_lines:
+        return SourceSnippetResult(
+            file_path=file_path,
+            line_start=line_start,
+            line_end=line_end,
+            source="",
+            error=f"line_start ({line_start}) exceeds file length ({total_lines} lines).",
+        )
+
+    effective_end = min(line_end, total_lines - 1)
+    snippet_lines = lines[line_start : effective_end + 1]
+    source = "\n".join(snippet_lines)
+
+    return SourceSnippetResult(
+        file_path=file_path,
+        line_start=line_start,
+        line_end=effective_end,
+        source=source,
+        error=None,
+    )
 
 
-def open_source_for_summary(repo: Repository, summary_id: str, records: Dict[str, InterfaceSummaryRecord]) -> Optional[str]:
+def open_source_for_summary(
+    repo: Repository,
+    summary_id: str,
+    records: Dict[str, InterfaceSummaryRecord],
+) -> Optional[str]:
     """Locate and read source code for a given summary record ID.
+
+    Returns just the source code text, or None if not found.
+    For structured results with error details, use
+    ``open_source_for_summary_structured`` instead.
 
     Parameters
     ----------
@@ -404,7 +738,49 @@ def open_source_for_summary(repo: Repository, summary_id: str, records: Dict[str
     -------
     Source code snippet string, or None if not found.
     """
+    result = open_source_for_summary_structured(repo, summary_id, records)
+    if result.error:
+        return None
+    return result.source
+
+
+def open_source_for_summary_structured(
+    repo: Repository,
+    summary_id: str,
+    records: Dict[str, InterfaceSummaryRecord],
+) -> SourceSnippetResult:
+    """Locate and read source code for a summary record ID with structured error reporting.
+
+    Unlike ``open_source_for_summary``, this function always returns a
+    ``SourceSnippetResult`` with clear error messages for missing IDs,
+    invalid paths, etc.
+
+    Parameters
+    ----------
+    repo
+        Active Repository instance.
+    summary_id
+        The record ID (e.g. "relative/path/file.py::symbol_name").
+    records
+        The dictionary of cached InterfaceSummaryRecords.
+
+    Returns
+    -------
+    SourceSnippetResult with file_path, line range, source, and error.
+    """
     record = records.get(summary_id)
     if not record:
-        return None
-    return get_source_snippet(repo, record.file_path, record.line_start, record.line_end)
+        return SourceSnippetResult(
+            file_path="",
+            line_start=-1,
+            line_end=-1,
+            source="",
+            error=f"Summary ID not found: {summary_id}. Available IDs: {list(records.keys())[:10]}",
+        )
+
+    return get_source_snippet_structured(
+        repo,
+        record.file_path,
+        record.line_start,
+        record.line_end,
+    )

@@ -6,31 +6,40 @@ __author__ = "cased"
 __version__ = "3.5.1"
 
 from .code_searcher import CodeSearcher
+from .codebase_markdown_docs import (
+    CodebaseMarkdownDocGenerator,
+    DocCache,
+    MarkdownRenderer,
+    SymbolDocRecord,
+    UsageExampleGenerator,
+)
 from .context_extractor import ContextExtractor
 from .docstring_indexer import DocstringIndexer, SummarySearcher
 from .interface_summary_index import (
+    InterfaceSummaryError,
     InterfaceSummaryIndexer,
     InterfaceSummaryRecord,
     InterfaceSummarySearcher,
+    SourceReadError,
+    SourceSnippetResult,
+    detect_interface_type,
     get_source_snippet,
+    get_source_snippet_structured,
     open_source_for_summary,
+    open_source_for_summary_structured,
 )
 from .llm_context import ContextAssembler
 from .multi_repo import MultiRepo
 from .repo_mapper import RepoMapper
 from .repository import Repository
+from .tool_schemas import get_tool_schemas
 from .tree_sitter_symbol_extractor import TreeSitterSymbolExtractor
 from .vector_searcher import VectorSearcher
 
 try:
     from .summaries import AnthropicConfig, GoogleConfig, LLMError, OpenAIConfig, Summarizer
 except ImportError:
-    # Allow kit to be imported even if LLM extras aren't installed.
-    # Users will get an ImportError later if they try to use Summarizer.
     pass
-
-# Helper for LLM tool schemas
-from .tool_schemas import get_tool_schemas
 
 # Compatibility patch for Click ≥ 8.2 breaking Typer ≤ 0.15
 # -----------------------------------------------------------------------------
@@ -101,24 +110,34 @@ except Exception:  # pragma: no cover – best-effort patch, never fail hard
     pass
 
 __all__ = [
-    "Repository",
-    "MultiRepo",
-    "RepoMapper",
+    "CodebaseMarkdownDocGenerator",
     "CodeSearcher",
-    "ContextExtractor",
-    "VectorSearcher",
-    "DocstringIndexer",
-    "SummarySearcher",
     "ContextAssembler",
-    "TreeSitterSymbolExtractor",
+    "ContextExtractor",
+    "DocCache",
+    "DocstringIndexer",
+    "InterfaceSummaryError",
     "InterfaceSummaryIndexer",
     "InterfaceSummaryRecord",
     "InterfaceSummarySearcher",
+    "MarkdownRenderer",
+    "MultiRepo",
+    "RepoMapper",
+    "Repository",
+    "SourceReadError",
+    "SourceSnippetResult",
+    "SummarySearcher",
+    "SymbolDocRecord",
+    "TreeSitterSymbolExtractor",
+    "UsageExampleGenerator",
+    "detect_interface_type",
     "get_source_snippet",
-    "open_source_for_summary",
+    "get_source_snippet_structured",
     "get_tool_schemas",
+    "open_source_for_summary",
+    "open_source_for_summary_structured",
     *(
-        ["Summarizer", "OpenAIConfig", "AnthropicConfig", "GoogleConfig", "LLMError"]
+        ["AnthropicConfig", "GoogleConfig", "LLMError", "OpenAIConfig", "Summarizer"]
         if "Summarizer" in globals()
         else []
     ),

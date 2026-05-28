@@ -111,6 +111,47 @@ contents = repo.get_file_content([
 print(contents["src/utils/helper.py"])
 ```
 
+### Code Documentation Generation
+
+Generate structured Markdown documentation from your codebase:
+
+```python
+from kit import Repository
+from kit.codebase_markdown_docs import CodebaseMarkdownDocGenerator
+
+# Load repository
+repo = Repository("/path/to/your/codebase")
+
+# Optional: configure LLM for AI-powered summaries
+from kit.summaries import OpenAIConfig
+config = OpenAIConfig(
+    api_key="your-api-key",
+    model="gpt-4",
+    base_url="https://api.openai.com/v1"  # or custom endpoint
+)
+summarizer = repo.get_summarizer(config)
+
+# Generate documentation
+generator = CodebaseMarkdownDocGenerator(repo=repo, summarizer=summarizer)
+records = generator.generate()
+
+# Render to Markdown
+renderer = MarkdownRenderer()
+md_content = renderer.render_full(records, title="My Project Docs")
+
+# Or generate directly to file
+generator.generate_to_file("docs.md", title="My Project Docs")
+
+# With options
+generator.generate_to_file(
+    "docs.md",
+    file_extensions=[".py", ".js"],  # Only Python and JavaScript files
+    max_symbols=100,                  # Limit to 100 symbols
+    verbose=True,                     # Include Type, Signature, Import, Location
+    include_source=True,              # Include source code blocks
+)
+```
+
 ### Command Line Interface
 
 `kit` provides a comprehensive CLI for repository analysis and code exploration.
@@ -170,6 +211,27 @@ kit package-search-hybrid django "authentication middleware"
 kit package-search-read requests "requests/models.py"
 ```
 
+**Code Documentation Generation:**
+```bash
+# Generate Markdown documentation for a repository
+kit code-docs generate /path/to/repo -o docs.md
+
+# With LLM-powered summaries (requires OPENAI_API_KEY or custom endpoint)
+kit code-docs generate /path/to/repo -o docs.md --base-url "https://api.openai.com/v1" --model "gpt-4"
+
+# Limit symbols and specific file extensions
+kit code-docs generate /path/to/repo -o docs.md --extensions ".py,.js" --max-symbols 50
+
+# Verbose mode (includes Type, Signature, Import, Location)
+kit code-docs generate /path/to/repo -o docs.md --verbose
+
+# Include source code in output
+kit code-docs generate /path/to/repo -o docs.md --verbose --include-source
+
+# Split output by directory
+kit code-docs generate /path/to/repo -o docs/ --split-by-dir
+```
+
 See the [CLI Documentation](https://kit.cased.com/introduction/cli) for comprehensive usage examples.
 
 ## Key Toolkit Capabilities
@@ -193,6 +255,13 @@ See the [CLI Documentation](https://kit.cased.com/introduction/cli) for comprehe
 *   **Generate Code Summaries:**
     *   Use LLMs to create natural language summaries for files, functions, or classes using the `Summarizer` (e.g., `summarizer.summarize_file()`, `summarizer.summarize_function()`).
     *   Build a searchable index of these AI-generated docstrings with `DocstringIndexer` and query it with `SummarySearcher` for intelligent code discovery.
+
+*   **Generate Codebase Documentation:**
+    *   Create structured Markdown documentation from your codebase with `CodebaseMarkdownDocGenerator`.
+    *   Automatically extracts symbols (functions, classes, methods), generates summaries, parameters, return values, and usage examples.
+    *   Supports LLM-powered summaries with custom endpoints (OpenAI, local models, etc.).
+    *   Output includes consistent fields: **Summary**, **Parameters**, **Return Value**, **Usage** for each symbol.
+    *   CLI support: `kit code-docs generate /path/to/repo -o docs.md`.
 
 *   **Analyze Code Dependencies:**
     *   Map import relationships between modules using `repo.get_dependency_analyzer()` to understand your codebase structure.

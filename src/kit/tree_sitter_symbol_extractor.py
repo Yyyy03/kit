@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, cast
 
 import tree_sitter
-from tree_sitter_language_pack import get_language, get_parser
+from tree_sitter_language_pack import get_language
 
 # Set up module-level logger
 logger = logging.getLogger(__name__)
@@ -117,7 +117,8 @@ class TreeSitterSymbolExtractor:
             return None
         if ext not in cls._parsers:
             lang_name = LANGUAGES[ext]
-            parser = get_parser(cast(Any, lang_name))  # type: ignore[arg-type]
+            lang = get_language(cast(Any, lang_name))
+            parser = tree_sitter.Parser(lang)
             cls._parsers[ext] = parser
         return cls._parsers[ext]
 
@@ -464,7 +465,7 @@ class TreeSitterSymbolExtractor:
                 )
                 subtype = None
                 if definition_capture:
-                    definition_capture_name, definition_node = definition_capture
+                    definition_capture_name, _definition_node = definition_capture
                     symbol_type = definition_capture_name.split(".")[-1]
                     # HCL: For resource/data, combine type and name, and set subtype to the specific resource/data type
                     if ext == ".tf" and symbol_type in ["resource", "data"]:

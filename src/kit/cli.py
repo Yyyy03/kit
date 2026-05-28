@@ -2235,5 +2235,106 @@ def multi_summary(
         raise typer.Exit(code=1)
 
 
+code_docs_app = typer.Typer(help="Generate structured Markdown documentation from a codebase.")
+app.add_typer(code_docs_app, name="code-docs")
+
+
+@code_docs_app.command("generate")
+def code_docs_generate(
+    path: str = typer.Argument(..., help="Path to the local repository."),
+    output: Optional[str] = typer.Option(
+        None, "--output", "-o", help="Output Markdown file path (or directory if --split-by-dir)."
+    ),
+    extensions: Optional[str] = typer.Option(
+        None, "--extensions", "-e", help="Comma-separated file extensions to include (e.g. '.py,.js')."
+    ),
+    max_symbols: Optional[int] = typer.Option(
+        None, "--max-symbols", help="Maximum number of symbols to document."
+    ),
+    force: bool = typer.Option(False, "--force", "-f", help="Force rebuild, bypassing cache."),
+    split_by_dir: bool = typer.Option(
+        False, "--split-by-dir", help="Split output into separate files per directory."
+    ),
+    include_source: bool = typer.Option(
+        False, "--include-source", help="Include full source code in output (default: compact mode without source)."
+    ),
+    verbose: bool = typer.Option(
+        False, "--verbose", "-v", help="Show extra details: Type, Signature, Import, Location, totals. Also enables source display with --include-source."
+    ),
+    llm_model: Optional[str] = typer.Option(None, "--model", "-m", help="LLM model for summaries."),
+    llm_base_url: Optional[str] = typer.Option(
+        None, "--base-url", "-b", help="LLM API base URL (e.g. 'https://open.bigmodel.cn/api/paas/v4/' for GLM)."
+    ),
+    title: str = typer.Option("Codebase Documentation", "--title", "-t", help="Title for the documentation."),
+    ref: Optional[str] = typer.Option(
+        None, "--ref", help="Git ref (SHA, tag, or branch) to checkout for remote repositories."
+    ),
+):
+    """Generate structured Markdown documentation for a repository.
+
+    Scans source files, extracts symbols, generates summaries and
+    usage examples, and renders Markdown documentation.
+
+    Examples:
+        kit code-docs generate . -o docs.md
+        kit code-docs generate . -o docs/ --split-by-dir --extensions ".py"
+        kit code-docs generate . --force --max-symbols 50
+    """
+    from kit import Repository
+    from kit.codebase_markdown_docs import CodebaseMarkdownDocGenerator
+    from kit.summaries import OpenAIConfig
+
+    try:
+        repo = Repository(path, ref=ref)
+
+        summarizer = None
+        api_key = os.getenv("OPENAI_API_KEY")
+        if llm_model or llm_base_url:
+            model = llm_model or "glm-5.1"
+            config = OpenAIConfig(api_key=api_key, model=model, base_url=llm_base_url)
+            summarizer = repo.get_summarizer(config)
+        elif api_key:
+            try:
+                config = OpenAIConfig()
+                summarizer = repo.get_summarizer(config)
+            except Exception:
+                pass
+
+        ext_list = None
+        if extensions:
+            ext_list = [e.strip() for e in extensions.split(",")]
+
+        generator = CodebaseMarkdownDocGenerator(repo=repo, summarizer=summarizer)
+
+        if output:
+            records, out_path = generator.generate_to_file(
+                output,
+                file_extensions=ext_list,
+                max_symbols=max_symbols,
+                force=force,
+                split_by_dir=split_by_dir,
+                title=title,
+                include_source=include_source,
+                verbose=verbose,
+            )
+            typer.echo(f"Documentation generated. {len(records)} symbols written to {out_path}")
+        else:
+            records, md = generator.generate(
+                file_extensions=ext_list,
+                max_symbols=max_symbols,
+                force=force,
+                split_by_dir=split_by_dir,
+                title=title,
+                include_source=include_source,
+                verbose=verbose,
+            )
+            typer.echo(f"Documentation generated. {len(records)} symbols documented.")
+            typer.echo(md)
+
+    except Exception as e:
+        typer.secho(f"Documentation generation failed: {e}", fg=typer.colors.RED)
+        raise typer.Exit(code=1)
+
+
 if __name__ == "__main__":
     app()
